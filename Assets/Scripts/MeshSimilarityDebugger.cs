@@ -58,9 +58,6 @@ public class MeshSimilarityDebugger : MonoBehaviour
     public bool useTrimmed = false;
     public bool useCapped = false;
 
-    [Header("Targets (Inspector’dan atayın)")]
-    public GameObject objectA;
-    public GameObject objectB;
 
     [Header("Sampling")]
     [Range(100, 50000)] public int samplesPerMesh = 12000;
@@ -81,10 +78,6 @@ public class MeshSimilarityDebugger : MonoBehaviour
     [Header("Metric")]
     public SimilarityMetric metric = SimilarityMetric.TrimmedHausdorff;
     [Range(0.5f, 0.999f)] public float hausdorffPercentile = 0.995f;
-
-
-
-
 
 
 
@@ -120,21 +113,7 @@ public class MeshSimilarityDebugger : MonoBehaviour
 
 
 
-
-
-
-
-
-
-
-
-
-    [Header("Similarity (Chamfer-based)")]
-    [Tooltip("0..1: Similarity = 1 - (Chamfer/Diagonal)")]
-    [ReadOnly] public float geometrySimilarity01;
-    [ReadOnly] public float chamferDistance;      // mutlak Chamfer veya yüzdelik NN
-    [ReadOnly] public float bboxDiagonal;         // normalize için diag
-
+   
     [Header("Debug & Control")]
     public bool autoComputeOnPlay = true;
     public KeyCode recomputeKey = KeyCode.R;
@@ -188,18 +167,13 @@ public class MeshSimilarityDebugger : MonoBehaviour
     [Header("Per-Child Aggregation")]
     public ChildAgg childAggregation = ChildAgg.Mean;
 
-    // --- Global toplama ve agresiflik üssü ---
-    public enum GlobalAgg { Mean, Max, GeometricMean }
-    [Header("Global Aggregation")]
-    public GlobalAgg globalAggregation = GlobalAgg.Max;
+
 
     [Header("Aggressiveness")]
     [Tooltip("Mesafeleri üssü alarak uzak farkları büyütür (1=normal, 2–3=agresif).")]
     [Range(1f, 4f)] public float distanceExponent = 2.5f;
 
-    public enum DiagNorm { Union, Mean, Min }
-    [Header("Normalization")]
-    public DiagNorm diagonalNorm = DiagNorm.Min;
+
 
     public enum HausdorffAgg { MeanOfDirs, MaxOfDirs }
     [Header("Hausdorff Aggregation")]
@@ -217,10 +191,50 @@ public class MeshSimilarityDebugger : MonoBehaviour
     string recallStr = "-";
     string f1Str = "-";
 
+
+
+    [Header("Global3D + Child Rotation Fusion")]
+    [Tooltip("Global3D cezasına (Chamfer mesafesine) çocukların ortalama rotasyon cezasını ekle.")]
+    public bool addChildRotationPenaltyToGlobal = false;
+
+
+
+    [Tooltip("Rotasyon benzerliği için referans (RootRelative önerilir).")]
+    public RotationReference rotationReferenceGlobal = RotationReference.RootRelative;
+
+  
+
+
+
+    [Tooltip("Rotasyon cezası (0..1) üstüne uygulanan üs. 1=doğrusal, >1 agresifleşir")]
+    [Range(0.5f, 8f)] public float rotPenaltyExp = 1.0f;
+
+    [Tooltip("Çocuk ortalamasını ölçekler (örn. 10x)")]
+    [Range(0f, 50f)] public float rotPenaltyChildMultiplier = 10f;
+
+    [Tooltip("Global mesafeye çevirirken kullanılan lambda (diag ile çarpılır)")]
+    [Range(0f, 2f)] public float rotPenaltyGlobalLambda = 0.50f;
+
+
+
+    [Header("Rotation Ambiguity")]
+    [Tooltip("θ bu eşiği aşarsa 180-θ uygulanır (PCA/OBB eksen belirsizliği).")]
+    [Range(0f, 180f)] public float flipReduceThresholdDeg = 100f;
+
+
+
+
+
     [Header("Match Stats (Read-only)")]
     [ReadOnly] public float matchRecall;
     [ReadOnly] public float matchPrecision;
     [ReadOnly] public float matchF1;
+
+
+
+    [Header("Targets (Inspector’dan atayın)")]
+    public GameObject objectA;
+    public GameObject objectB;
 
     // Internal state (gizmos)
     private readonly List<Vector3> ptsA = new List<Vector3>();
@@ -232,9 +246,12 @@ public class MeshSimilarityDebugger : MonoBehaviour
     private readonly List<BoundaryClass> clsA = new List<BoundaryClass>();
     private readonly List<BoundaryClass> clsB = new List<BoundaryClass>();
 
-    [ReadOnly] public float recallAB_last;
-    [ReadOnly] public float recallBA_last;
 
+    [Header("Similarity (Chamfer-based)")]
+    [Tooltip("0..1: Similarity = 1 - (Chamfer/Diagonal)")]
+    [ReadOnly] public float geometrySimilarity01;
+    [ReadOnly] public float chamferDistance;      // mutlak Chamfer veya yüzdelik NN
+    [ReadOnly] public float bboxDiagonal;         // normalize için diag
 
     // --- lifecycle ---
     void Start()
@@ -253,15 +270,25 @@ public class MeshSimilarityDebugger : MonoBehaviour
         Vector3 s = Vector3.zero; for (int i = 0; i < pts.Count; i++) s += pts[i];
         return s / pts.Count;
     }
-
+    const float rotZeroEpsDeg = 0.03f;  // 0.03°
+    const float posZeroEps = 0.0005f; // 0.5 mm
     float RotationSimilarityFromTheta(float thetaDeg)
     {
+        if (thetaDeg <= rotZeroEpsDeg) return 1f;
         float t = Mathf.Clamp01(thetaDeg / Mathf.Max(1e-3f, rotCapDeg));
         float rotSim = 1f - Mathf.Pow(t, Mathf.Max(1f, rotGamma));
         rotSim = Mathf.Pow(Mathf.Clamp01(rotSim), Mathf.Max(0.5f, rotEmphasis));
         return Mathf.Clamp01(rotSim);
     }
 
+    float PositionSimilarityFromDelta(float delta)
+    {
+        if (delta <= posZeroEps) return 1f;
+        float t = Mathf.Clamp01(delta / Mathf.Max(1e-6f, posCap));
+        float s = 1f - Mathf.Pow(t, Mathf.Max(1f, posGamma));
+        s = Mathf.Pow(Mathf.Clamp01(s), Mathf.Max(0.5f, posEmphasis));
+        return Mathf.Clamp01(s);
+    }
     // --- Position helpers ---
     Vector3 GetRefPosition(Transform child, Transform root)
     {
@@ -274,13 +301,6 @@ public class MeshSimilarityDebugger : MonoBehaviour
         }
     }
 
-    float PositionSimilarityFromDelta(float delta)
-    {
-        float t = Mathf.Clamp01(delta / Mathf.Max(1e-6f, posCap));
-        float s = 1f - Mathf.Pow(t, Mathf.Max(1f, posGamma));
-        s = Mathf.Pow(Mathf.Clamp01(s), Mathf.Max(0.5f, posEmphasis));
-        return Mathf.Clamp01(s);
-    }
 
     void CenterAlignByBoundsPts(List<Vector3> A, List<Vector3> B)
     {
@@ -753,8 +773,6 @@ public class MeshSimilarityDebugger : MonoBehaviour
 
 
 
-
-
     // --- MAIN ---
     [ContextMenu("Compute Now")]
     public void ComputeAll()
@@ -876,17 +894,16 @@ public class MeshSimilarityDebugger : MonoBehaviour
                 if (holeAwareMatching)
                 {
                     chAB = PercentileNearestDistHoleAware(
-     ptsA, clsA, ptsB, clsB, bboxDiagonal,
-     useCapped ? capAtDiagFrac : 0f, out recallAB, matchDeltaFrac, hausdorffPercentile,
-     holePenaltyMultiplier,
-     drawNearestNeighborLines ? nnLinesA2B : null, maxNNLinesPerSet);
+                        ptsA, clsA, ptsB, clsB, bboxDiagonal,
+                        useCapped ? capAtDiagFrac : 0f, out recallAB, matchDeltaFrac, hausdorffPercentile,
+                        holePenaltyMultiplier,
+                        drawNearestNeighborLines ? nnLinesA2B : null, maxNNLinesPerSet);
 
                     chBA = PercentileNearestDistHoleAware(
                         ptsB, clsB, ptsA, clsA, bboxDiagonal,
                         useCapped ? capAtDiagFrac : 0f, out recallBA, matchDeltaFrac, hausdorffPercentile,
                         holePenaltyMultiplier,
                         drawNearestNeighborLines ? nnLinesB2A : null, maxNNLinesPerSet);
-
                 }
                 else
                 {
@@ -916,7 +933,7 @@ public class MeshSimilarityDebugger : MonoBehaviour
                     out recallBA, matchDeltaFrac);
             }
 
-            // Hausdorff yön birleştirme
+            // Hausdorff yön birleştirme veya Chamfer mean
             if (metric == SimilarityMetric.TrimmedHausdorff)
                 chamferDistance = (hausdorffAggregation == HausdorffAgg.MaxOfDirs) ? Mathf.Max(chAB, chBA) : 0.5f * (chAB + chBA);
             else
@@ -942,9 +959,30 @@ public class MeshSimilarityDebugger : MonoBehaviour
                 chamferDistance += extraScale;
             }
 
-            // ---------- 4.2) DELİK CEZASI (0..1) → BENZERLİKTE KARIŞTIR ----------
-            // Not: Delik etkisini artık mesafeye eklemiyoruz; benzerlikte ağırlıklı karıştırıyoruz.
-            // ---------- Outer Sim ----------
+            // ---------- 4.2) YENİ: ÇOCUK ROTASYON CEZASI → MESAFEYE EKLE ----------
+            if (addChildRotationPenaltyToGlobal && useRotationPenalty)
+            {
+                var prevRef = rotationReference;
+                rotationReference = rotationReferenceGlobal;
+
+                int matched;
+                float rotPenalty01 = ComputeChildRotationPenaltyAvg01(objectA, objectB, out matched); // 0..1 (ham ortalama)
+                rotationReference = prevRef;
+
+                // AĞIRLIKLANDIRMA: (penalty^exp) * multiplier
+                float penWeighted = Mathf.Pow(Mathf.Clamp01(rotPenalty01), Mathf.Max(0.5f, rotPenaltyExp))
+                                    * Mathf.Max(0f, rotPenaltyChildMultiplier);
+
+                float extraRot = Mathf.Max(0f, rotPenaltyGlobalLambda) * penWeighted * bboxDiagonal;
+                chamferDistance += extraRot;
+
+                UnityEngine.Debug.Log(
+                    $"[RotFusion] rawPen={rotPenalty01:F3} penWeighted={penWeighted:F3} " +
+                    $"extraRotDist={extraRot:F6} (lambda={rotPenaltyGlobalLambda:F2}, mult={rotPenaltyChildMultiplier:F2}, exp={rotPenaltyExp:F2}, diag={bboxDiagonal:F6})");
+            }
+
+
+            // ---------- 4.3) DELİK KARŞIMI / DIŞ SIM ----------
             float outerSim01;
             {
                 float normValOuter = Mathf.Clamp01(chamferDistance / bboxDiagonal);
@@ -1097,89 +1135,54 @@ public class MeshSimilarityDebugger : MonoBehaviour
 
 
 
-    // Delik/outer döngülerinden alan ve çevre istatistiklerini üretir.
-    // Not: 2D düzlem varsayımı (projectPlanar/forcePlanarFor2D sonrası noktalar XY'dedir).
-    void ComputeHoleStatsForObject(GameObject go, bool poseInv,
-        out float outerArea, out float outerPerim,
-        out List<float> holeAreas, out List<float> holePerims)
+  
+    // Bir Transform altındaki tüm MeshFilter'lar arasından, bounds hacmi en büyük olanı seç.
+    static MeshFilter SelectPrimaryMeshFilter(Transform rootOfGroup)
     {
-        outerArea = 0f; outerPerim = 0f;
-        holeAreas = new List<float>(); holePerims = new List<float>();
+        MeshFilter best = null;
+        float bestVol = -1f;
 
-        // 1) Tüm boundary segmentlerini topla
-        var segsRaw = new List<Seg>();
-        foreach (var f in go.GetComponentsInChildren<MeshFilter>(true))
-            if (f.sharedMesh) CollectBoundarySegments(f.sharedMesh, f.transform, go.transform, poseInv, segsRaw);
-
-        if (segsRaw.Count == 0)
-            return;
-
-        // 2) Loop'ları kur ve outer/hole sınıfı ver
-        List<Seg> segsOuter, segsHole;
-        ClassifyLoops(segsRaw, out segsOuter, out segsHole);
-
-        // 3) Loop'ları yeniden kurmak için outer ve hole segmentlerini ayrı ayrı topla
-        List<List<Vector3>> loopsOuter = BuildLoopsFromSegments(segsOuter);
-        List<List<Vector3>> loopsHole = BuildLoopsFromSegments(segsHole);
-
-        // 4) Outer: en büyük alanlı loop'u outer sayalım (ClassifyLoops zaten böyle işaretliyor ama
-        //    loop parçalanmış ise buradan ek güvence sağlarız)
-        float maxAbsArea = 0f;
-        int outerIdx = -1;
-        for (int i = 0; i < loopsOuter.Count; i++)
+        var mfs = rootOfGroup.GetComponentsInChildren<MeshFilter>(includeInactive: true);
+        foreach (var mf in mfs)
         {
-            float a = Mathf.Abs(SignedArea2D(loopsOuter[i]));
-            if (a > maxAbsArea) { maxAbsArea = a; outerIdx = i; }
+            if (mf == null || mf.sharedMesh == null) continue;
+            var b = mf.sharedMesh.bounds;               // local bounds
+            float vol = Mathf.Max(1e-9f, b.size.x * b.size.y * b.size.z);
+            if (vol > bestVol) { bestVol = vol; best = mf; }
         }
-        if (outerIdx >= 0)
+        return best; // bulunamazsa null dönebilir
+    }
+    // Kökün doğrudan çocuklarını (0..N-1 sırayla) dolaşır,
+    // her bir çocuk altından "primary" MeshFilter'ı seçer.
+    static MeshFilter[] GetPrimaryMeshesByFirstLevelOrder(GameObject rootGO)
+    {
+        if (!rootGO) return System.Array.Empty<MeshFilter>();
+
+        var root = rootGO.transform;
+        int n = root.childCount;
+        var result = new List<MeshFilter>(n);
+
+        for (int i = 0; i < n; i++)
         {
-            outerArea = Mathf.Abs(SignedArea2D(loopsOuter[outerIdx]));
-            // çevre:
-            float per = 0f;
-            var L = loopsOuter[outerIdx];
-            for (int k = 0; k < L.Count; k++)
-                per += Vector3.Distance(L[k], L[(k + 1) % L.Count]);
-            outerPerim = Mathf.Max(outerPerim, per);
+            var group = root.GetChild(i);                 // i = kardeş indeks
+            var mf = SelectPrimaryMeshFilter(group);
+            if (mf != null && mf.sharedMesh != null)
+                result.Add(mf);
         }
-
-        // 5) Delikler: her loop'un alan/çevresini al
-        for (int i = 0; i < loopsHole.Count; i++)
-        {
-            var L = loopsHole[i];
-            if (L.Count < 3) continue;
-            float a = Mathf.Abs(SignedArea2D(L));
-            float p = 0f;
-            for (int k = 0; k < L.Count; k++)
-                p += Vector3.Distance(L[k], L[(k + 1) % L.Count]);
-
-            // gürültü deliklerini ele
-            if (a > 1e-8f && p > 1e-6f)
-            {
-                holeAreas.Add(a);
-                holePerims.Add(p);
-            }
-        }
-
-        // 6) Büyükten küçüğe sırala (eşleştirirken en büyüğü en büyüğe eşleyelim)
-        holeAreas.Sort((x, y) => y.CompareTo(x));
-        holePerims.Sort((x, y) => y.CompareTo(x));
+        return result.ToArray();
     }
 
 
     // ---------- Parça-bazlı benzerlik ----------
     float ChildwiseSimilarity01(GameObject A, GameObject B, out float worstChildSim01)
     {
-        var fa = A.GetComponentsInChildren<MeshFilter>(true);
-        var fb = B.GetComponentsInChildren<MeshFilter>(true);
-
-        // Hiyerarşi yoluna göre sırala (eşleşme kararlı olsun)
-        Array.Sort(fa, (x, y) => string.CompareOrdinal(GetHierarchyPath(x.transform), GetHierarchyPath(y.transform)));
-        Array.Sort(fb, (x, y) => string.CompareOrdinal(GetHierarchyPath(x.transform), GetHierarchyPath(y.transform)));
+        // *** EŞLEŞTİRME: Birinci seviye çocuk index sırası ***
+        var fa = GetPrimaryMeshesByFirstLevelOrder(A);   // Group0, Group1, ...
+        var fb = GetPrimaryMeshesByFirstLevelOrder(B);   // Group0, Group1, ...
 
         int m = Mathf.Min(fa.Length, fb.Length);
         if (m == 0) { worstChildSim01 = 0f; return 0f; }
 
-        // Çocuk başına örnek sayısı (üstteki samplesPerMesh toplamdan pay edilir)
         int perChild = Mathf.Max(200, samplesPerMesh / Mathf.Max(1, m));
 
         List<float> childSims = new List<float>(m);
@@ -1188,12 +1191,11 @@ public class MeshSimilarityDebugger : MonoBehaviour
 
         for (int i = 0; i < m; i++)
         {
-            var ma = fa[i].sharedMesh;
-            var mb = fb[i].sharedMesh;
+            var mfa = fa[i]; var mfb = fb[i];
+            var ma = mfa.sharedMesh; var mb = mfb.sharedMesh;
 
-            // Rotasyon bazlı karşılaştırma istendiği için, geometri örnekleme opsiyonel.
-            // Yine de shapeSim istenirse üretilebilsin diye örnekleyip hazır tutacağız.
-            float shapeSim = 1f; // sade: default 1 (rotation-only modunda kullanılmaz)
+            // --- (İstenirse) şekil benzerliği ---
+            float shapeSim = 1f;
             if ((rotMode != RotationPenaltyMode.RotationOnly) && ma != null && mb != null)
             {
                 var pa = new List<Vector3>(perChild);
@@ -1201,15 +1203,15 @@ public class MeshSimilarityDebugger : MonoBehaviour
                 var na = new List<Vector3>(perChild);
                 var nb = new List<Vector3>(perChild);
 
-                int seedA = CombineSeed(randomSeed, ma.GetInstanceID(), fa[i].transform.GetInstanceID());
-                int seedB = CombineSeed(randomSeed, mb.GetInstanceID(), fb[i].transform.GetInstanceID());
+                int seedA = CombineSeed(randomSeed, ma.GetInstanceID(), mfa.transform.GetInstanceID());
+                int seedB = CombineSeed(randomSeed, mb.GetInstanceID(), mfb.transform.GetInstanceID());
                 var prev = UnityEngine.Random.state;
 
                 UnityEngine.Random.InitState(seedA);
-                SampleSurfacePointsWithNormals(ma, fa[i].transform, A.transform, perChild, poseInvariant, pa, na);
+                SampleSurfacePointsWithNormals(ma, mfa.transform, A.transform, perChild, poseInvariant, pa, na);
 
                 UnityEngine.Random.InitState(seedB);
-                SampleSurfacePointsWithNormals(mb, fb[i].transform, B.transform, perChild, poseInvariant, pb, nb);
+                SampleSurfacePointsWithNormals(mb, mfb.transform, B.transform, perChild, poseInvariant, pb, nb);
 
                 UnityEngine.Random.state = prev;
 
@@ -1235,14 +1237,12 @@ public class MeshSimilarityDebugger : MonoBehaviour
                 }
                 else
                 {
-                    chAB = AvgNearestDistRobust(
-                        pa, pb, 1f,
+                    chAB = AvgNearestDistRobust(pa, pb, 1f,
                         useTrimmed ? trimTopPercent : 0f,
                         useCapped ? capAtDiagFrac : 0f,
                         null, 0, out _, matchDeltaFrac);
 
-                    chBA = AvgNearestDistRobust(
-                        pb, pa, 1f,
+                    chBA = AvgNearestDistRobust(pb, pa, 1f,
                         useTrimmed ? trimTopPercent : 0f,
                         useCapped ? capAtDiagFrac : 0f,
                         null, 0, out _, matchDeltaFrac);
@@ -1252,45 +1252,33 @@ public class MeshSimilarityDebugger : MonoBehaviour
                 shapeSim = 1f - Mathf.Clamp01(ch / d);
             }
 
-            // Rotasyon referansı
-            Quaternion qA = GetRefRotation(fa[i].transform, A.transform);
-            Quaternion qB = GetRefRotation(fb[i].transform, B.transform);
+            // --- Pose (rot+pos) benzerliği: index i → i ---
+            Quaternion qA = GetRefRotation(mfa.transform, A.transform);
+            Quaternion qB = GetRefRotation(mfb.transform, B.transform);
             float thetaDeg = Quaternion.Angle(qA, qB);
             float rotSim = useRotationPenalty ? RotationSimilarityFromTheta(thetaDeg) : 1f;
 
-            // Pozisyon referansı ve benzerlik
             float posSim = 1f;
             if (usePositionPenalty)
             {
-                Vector3 pA = GetRefPosition(fa[i].transform, A.transform);
-                Vector3 pB = GetRefPosition(fb[i].transform, B.transform);
+                Vector3 pA = GetRefPosition(mfa.transform, A.transform);
+                Vector3 pB = GetRefPosition(mfb.transform, B.transform);
                 float delta = Vector3.Distance(pA, pB);
                 posSim = PositionSimilarityFromDelta(delta);
             }
 
-            // rotSim + posSim → poseSim
-            float poseSim;
-            switch (poseCombine)
-            {
-                case PoseCombine.Multiplicative: poseSim = rotSim * posSim; break;
-                case PoseCombine.LinearBlend: poseSim = Mathf.Lerp(rotSim, posSim, Mathf.Clamp01(poseBlendWeight)); break;
-                case PoseCombine.Min:
-                default: poseSim = Mathf.Min(rotSim, posSim); break;
-            }
+            float poseSim =
+                (poseCombine == PoseCombine.Multiplicative) ? (rotSim * posSim) :
+                (poseCombine == PoseCombine.LinearBlend) ? Mathf.Lerp(rotSim, posSim, Mathf.Clamp01(poseBlendWeight)) :
+                                                             Mathf.Min(rotSim, posSim);
 
-            // LOG
-            UnityEngine.Debug.Log($"[PerChild Pose] idx={i} A={fa[i].name} B={fb[i].name} θ={thetaDeg:F2}° rotSim={rotSim:F3} posSim={posSim:F3} -> poseSim={poseSim:F3} shapeSim={shapeSim:F3}");
+            float finalSim =
+                (rotMode == RotationPenaltyMode.RotationOnly) ? poseSim :
+                (rotMode == RotationPenaltyMode.Multiplicative) ? shapeSim * poseSim :
+                (rotMode == RotationPenaltyMode.LinearBlend) ? Mathf.Lerp(shapeSim, poseSim, Mathf.Clamp01(rotWeight)) :
+                                                                    Mathf.Min(shapeSim, poseSim);
 
-            // finalSim: rotMode'a göre şekil ile birleştir
-            float finalSim;
-            if (rotMode == RotationPenaltyMode.RotationOnly)
-                finalSim = poseSim; // sadece pose (rot+pos)
-            else if (rotMode == RotationPenaltyMode.Multiplicative)
-                finalSim = shapeSim * poseSim;
-            else if (rotMode == RotationPenaltyMode.LinearBlend)
-                finalSim = Mathf.Lerp(shapeSim, poseSim, Mathf.Clamp01(rotWeight));
-            else // MaxOfBoth
-                finalSim = Mathf.Min(shapeSim, poseSim);
+            UnityEngine.Debug.Log($"[PerChild Index] idx={i} A={mfa.transform.name} B={mfb.transform.name} θ={thetaDeg:F2}° rot={rotSim:F3} pos={posSim:F3} -> pose={poseSim:F3} shape={shapeSim:F3} final={finalSim:F3}");
 
             childSims.Add(finalSim);
             sumSim += finalSim;
@@ -1301,26 +1289,10 @@ public class MeshSimilarityDebugger : MonoBehaviour
 
         switch (childAggregation)
         {
-            case ChildAgg.Mean:
-                return (float)(sumSim / childSims.Count);
-
-            case ChildAgg.GeometricMean:
-                {
-                    double prod = 1.0;
-                    for (int i = 0; i < childSims.Count; i++)
-                        prod *= Mathf.Clamp01(childSims[i]);
-                    return (float)Math.Pow(prod, 1.0 / Math.Max(1, childSims.Count));
-                }
-
-            case ChildAgg.Min:
-                return worstSim;
-
-            case ChildAgg.Pct25:
-                {
-                    childSims.Sort();
-                    int k = Mathf.Clamp(Mathf.RoundToInt(0.25f * (childSims.Count - 1)), 0, childSims.Count - 1);
-                    return childSims[k];
-                }
+            case ChildAgg.Mean: return (float)(sumSim / childSims.Count);
+            case ChildAgg.GeometricMean: { double prod = 1.0; for (int i = 0; i < childSims.Count; i++) prod *= Mathf.Clamp01(childSims[i]); return (float)Math.Pow(prod, 1.0 / Math.Max(1, childSims.Count)); }
+            case ChildAgg.Min: return worstSim;
+            case ChildAgg.Pct25: childSims.Sort(); int k = Mathf.Clamp(Mathf.RoundToInt(0.25f * (childSims.Count - 1)), 0, childSims.Count - 1); return childSims[k];
         }
         return (float)(sumSim / childSims.Count);
     }
@@ -1586,96 +1558,9 @@ public class MeshSimilarityDebugger : MonoBehaviour
         }
     }
 
-    // Outer/holes alan-çevre + hole centroid listelerini üretir.
-    // ÇIKTI: holes, ALANA GÖRE BÜYÜKTEN KÜÇÜĞE SIRALANMIŞTIR (areas/perims/centroids paralel).
-    void ComputeHoleStatsForObject(GameObject go, bool poseInv,
-        out float outerArea, out float outerPerim,
-        out List<float> holeAreas, out List<float> holePerims, out List<Vector3> holeCentroids)
-    {
-        outerArea = 0f; outerPerim = 0f;
-        holeAreas = new List<float>();
-        holePerims = new List<float>();
-        holeCentroids = new List<Vector3>();
+   
 
-        // 1) Boundary segmentleri topla
-        var segsRaw = new List<Seg>();
-        foreach (var f in go.GetComponentsInChildren<MeshFilter>(true))
-            if (f.sharedMesh) CollectBoundarySegments(f.sharedMesh, f.transform, go.transform, poseInv, segsRaw);
-        if (segsRaw.Count == 0) return;
 
-        // 2) Outer / hole sınıflandır
-        List<Seg> segsOuter, segsHole;
-        ClassifyLoops(segsRaw, out segsOuter, out segsHole);
-
-        // 3) Loop’ları kur
-        var loopsOuter = BuildLoopsFromSegments(segsOuter);
-        var loopsHole = BuildLoopsFromSegments(segsHole);
-
-        // 4) En büyük outer loop
-        int bestIdx = -1; float bestAbs = 0f;
-        for (int i = 0; i < loopsOuter.Count; i++)
-        {
-            float a = Mathf.Abs(SignedArea2D(loopsOuter[i]));
-            if (a > bestAbs) { bestAbs = a; bestIdx = i; }
-        }
-        if (bestIdx >= 0)
-        {
-            outerArea = Mathf.Abs(SignedArea2D(loopsOuter[bestIdx]));
-            outerPerim = PolylinePerimeter(loopsOuter[bestIdx]);
-        }
-
-        // 5) Hole istatistikleri
-        var tmp = new List<(float area, float perim, Vector3 centroid)>();
-        for (int i = 0; i < loopsHole.Count; i++)
-        {
-            var L = loopsHole[i];
-            if (L.Count < 3) continue;
-            float a = Mathf.Abs(SignedArea2D(L));
-            float p = PolylinePerimeter(L);
-            if (a <= 1e-8f || p <= 1e-6f) continue;
-
-            // centroid (XY düzlem varsayımı: önceden ProjectToBestPlane çağrısı yapılmış olabilir)
-            Vector3 c = PolygonCentroidXY(L);
-            tmp.Add((a, p, c));
-        }
-
-        // 6) Alan büyükten küçüğe sırala ve paralel listeleri doldur
-        tmp.Sort((u, v) => v.area.CompareTo(u.area));
-        for (int i = 0; i < tmp.Count; i++)
-        {
-            holeAreas.Add(tmp[i].area);
-            holePerims.Add(tmp[i].perim);
-            holeCentroids.Add(tmp[i].centroid);
-        }
-    }
-
-    float PolylinePerimeter(List<Vector3> poly)
-    {
-        float p = 0f;
-        for (int i = 0; i < poly.Count; i++)
-            p += Vector3.Distance(poly[i], poly[(i + 1) % poly.Count]);
-        return p;
-    }
-
-    // Kapalı basit poligon centroid (XY düzleminde)
-    Vector3 PolygonCentroidXY(List<Vector3> poly)
-    {
-        double A = 0.0, Cx = 0.0, Cy = 0.0;
-        int n = poly.Count;
-        for (int i = 0; i < n; i++)
-        {
-            var p = poly[i]; var q = poly[(i + 1) % n];
-            double cross = (double)p.x * q.y - (double)q.x * p.y;
-            A += cross;
-            Cx += (p.x + q.x) * cross;
-            Cy += (p.y + q.y) * cross;
-        }
-        A *= 0.5;
-        if (Mathf.Abs((float)A) < 1e-12f) return new Vector3(0, 0, 0);
-        Cx /= (6.0 * A);
-        Cy /= (6.0 * A);
-        return new Vector3((float)Cx, (float)Cy, 0f);
-    }
 
 
 
@@ -1805,34 +1690,8 @@ public class MeshSimilarityDebugger : MonoBehaviour
 
 
 
-    Bounds LocalMeshBoundsAll(GameObject go)
-    {
-        var filters = go.GetComponentsInChildren<MeshFilter>(includeInactive: true);
-        bool hasAny = false;
-        Bounds b = new Bounds(Vector3.zero, Vector3.zero);
+  
 
-        Array.Sort(filters, (x, y) =>
-            string.CompareOrdinal(GetHierarchyPath(x.transform), GetHierarchyPath(y.transform)));
-
-        foreach (var f in filters)
-        {
-            if (f.sharedMesh == null) continue;
-            var mb = LocalMeshBounds(f.sharedMesh);
-            if (!hasAny) { b = mb; hasAny = true; }
-            else b.Encapsulate(mb);
-        }
-        if (!hasAny) b = new Bounds(Vector3.zero, Vector3.zero);
-        return b;
-    }
-
-    Bounds LocalMeshBounds(Mesh m)
-    {
-        var v = m.vertices;
-        if (v == null || v.Length == 0) return new Bounds(Vector3.zero, Vector3.zero);
-        var b = new Bounds(v[0], Vector3.zero);
-        for (int i = 1; i < v.Length; i++) b.Encapsulate(v[i]);
-        return b;
-    }
 
     void SpawnMarkers()
     {
@@ -1864,6 +1723,356 @@ public class MeshSimilarityDebugger : MonoBehaviour
             Instantiate(pointPrefab, pWorld, Quaternion.identity, bRoot).name = "Bpt";
         }
     }
+
+
+
+    /// <summary>
+    /// Birinci seviye çocukları index sırasına göre eşleyip,
+    /// MESH YÜZEYİNDEN (tüm vertexlerle) türetilen OBB (world) açı farkından rotasyon benzerliği üretir.
+    /// Örnekleme yok; dejenerasyon (simetri) tespitinde θ=0 kabul edilir.
+    /// Ortalama ceza (penalty01 = 1 - avg(rotSim)) döndürür. Ayrıntılı debug yazar.
+    /// </summary>
+    float ComputeChildRotationPenaltyAvg01(GameObject A, GameObject B, out int matchedCount)
+    {
+        matchedCount = 0;
+
+        var fa = GetPrimaryMeshesByFirstLevelOrder(A);
+        var fb = GetPrimaryMeshesByFirstLevelOrder(B);
+        int m = Mathf.Min(fa.Length, fb.Length);
+        if (m == 0) return 0f;
+
+        double sumPenalty = 0.0;
+        int used = 0;
+
+        for (int i = 0; i < m; i++)
+        {
+            var mfa = fa[i];
+            var mfb = fb[i];
+            if (mfa == null || mfb == null || mfa.sharedMesh == null || mfb.sharedMesh == null) continue;
+
+            // 1) WORLD tepe noktaları (deterministik)
+            _GetWorldVertices(mfa.sharedMesh, mfa.transform, _bufA);
+            _GetWorldVertices(mfb.sharedMesh, mfb.transform, _bufB);
+
+            // 2) Pozisyon etkisini kaldır: centroid’e göre merkezle
+            _CenterToCentroid(_bufA);
+            _CenterToCentroid(_bufB);
+
+            // 3) OBB (EXACT) + dejenerasyon bilgisi
+            var obbA = _BuildOBBExact(_bufA, out var degenA);
+            var obbB = _BuildOBBExact(_bufB, out var degenB);
+
+            float thetaDeg;
+
+            // 3.1) Eğer her iki taraf da “yön anlamsız” (neredeyse küre/küp) ise → θ=0
+            if (_IsDirectionUndefined(degenA) && _IsDirectionUndefined(degenB))
+            {
+                thetaDeg = 0f;
+            }
+            else
+            {
+                // 4) Eksenleri en iyi şekilde hizala (permütasyon + işaret) → R = MB * MA^T
+                Matrix3x3 MA = Matrix3x3.FromColumns(obbA.ex, obbA.ey, obbA.ez);
+                Matrix3x3 MB = _BestAlignBToA(obbA, obbB);
+                Matrix3x3 R = MB * MA.Transpose();
+
+                // 5) Açı (0..180) ve 100°→180-θ düzeltmesi
+                float thetaRaw = _RotationAngleDegFromMatrix(R);
+                thetaDeg = thetaRaw;
+                if (thetaDeg > Mathf.Clamp(flipReduceThresholdDeg, 0f, 180f))
+                    thetaDeg = 180f - thetaDeg;
+                if (thetaDeg < 0f) thetaDeg = 0f;
+            }
+
+            // 6) Benzerlik ve ceza
+            float rotSim = RotationSimilarityFromTheta(thetaDeg);
+            float penalty = 1f - Mathf.Clamp01(rotSim);
+
+            UnityEngine.Debug.Log(
+                $"[RotFusion(OBB-WORLD(EXACT))] idx={i} A={mfa.transform.name} B={mfb.transform.name} " +
+                $"θ={thetaDeg:F2}° rotSim={rotSim:F3} penalty={penalty:F3} " +
+                $"| degenA=({_DegenStr(degenA)}), degenB=({_DegenStr(degenB)})");
+
+            sumPenalty += penalty;
+            used++;
+        }
+
+        matchedCount = used;
+        if (used == 0) return 0f;
+
+        float penaltyAvg01 = Mathf.Clamp01((float)(sumPenalty / used));
+        UnityEngine.Debug.Log($"[RotFusion(OBB-WORLD(EXACT))] avgPenalty01={penaltyAvg01:F3} (matched={used})");
+        return penaltyAvg01;
+    }
+
+    /* ===================== Yardımcılar (EXACT OBB + dejenerasyon) ===================== */
+
+    // Tekrarlı alloc kaçınmak için buffer’lar
+    readonly List<Vector3> _bufA = new List<Vector3>(32768);
+    readonly List<Vector3> _bufB = new List<Vector3>(32768);
+
+    void _GetWorldVertices(Mesh m, Transform t, List<Vector3> outList)
+    {
+        outList.Clear();
+        var v = m.vertices;
+        if (v == null || v.Length == 0) return;
+        outList.Capacity = Mathf.Max(outList.Capacity, v.Length);
+        for (int i = 0; i < v.Length; i++)
+            outList.Add(t.TransformPoint(v[i]));
+    }
+
+    void _CenterToCentroid(List<Vector3> pts)
+    {
+        if (pts.Count == 0) return;
+        Vector3 c = Vector3.zero;
+        for (int i = 0; i < pts.Count; i++) c += pts[i];
+        c /= pts.Count;
+        for (int i = 0; i < pts.Count; i++) pts[i] -= c;
+    }
+
+    struct OBBFrame
+    {
+        public Vector3 ex, ey, ez;   // world’de ortonormal eksenler (sağ elli)
+        public Vector3 halfExtents;  // her eksendeki yarım uzunluk
+    }
+
+    struct DegenInfo
+    {
+        // eigen gap ve extents oranı ile kararsız eksenleri işaretliyoruz
+        public bool axis01Close; // büyük-orta
+        public bool axis12Close; // orta-küçük
+        public bool allClose;    // üçü de yakın (yaklaşık küre/küp)
+    }
+
+    string _DegenStr(DegenInfo d)
+        => d.allClose ? "ALL" : (d.axis01Close || d.axis12Close ? "PARTIAL" : "NONE");
+
+    // “yön anlamsız” say kriteri
+    bool _IsDirectionUndefined(DegenInfo d) => d.allClose;
+
+    /*
+     * EXACT OBB:
+     * - Kovaryans → PCA eksenleri (deterministik, tüm vertexler)
+     * - Projeksiyon min/max ile halfExtents
+     * - Extents’e göre eksenleri sırala
+     * - Sağ-elli yap
+     * - Dejenerasyon bilgisi çıkar (eksenler arası farklar küçükse)
+     */
+    OBBFrame _BuildOBBExact(List<Vector3> pts, out DegenInfo degen)
+    {
+        degen = default;
+        if (pts == null || pts.Count == 0)
+            return new OBBFrame { ex = Vector3.right, ey = Vector3.up, ez = Vector3.forward, halfExtents = Vector3.zero };
+
+        // Kovaryans (merkezlenmiş varsayımı; merkezledik)
+        double xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+        int n = pts.Count;
+        for (int i = 0; i < n; i++)
+        {
+            var p = pts[i];
+            xx += p.x * p.x; xy += p.x * p.y; xz += p.x * p.z;
+            yy += p.y * p.y; yz += p.y * p.z; zz += p.z * p.z;
+        }
+        double inv = 1.0 / Math.Max(1, n);
+        xx *= inv; xy *= inv; xz *= inv; yy *= inv; yz *= inv; zz *= inv;
+
+        // PCA
+        var C = new _Sym3(xx, xy, xz, yy, yz, zz);
+        Vector3 v0, v1, v2; double l0, l1, l2;
+        _JacobiEigen(C, out v0, out v1, out v2, out l0, out l1, out l2);
+        _SortEigen(ref v0, ref v1, ref v2, ref l0, ref l1, ref l2);
+
+        // Ortonormal + sağ elli
+        v0.Normalize();
+        v1 = (v1 - Vector3.Dot(v1, v0) * v0).normalized;
+        Vector3 v2c = Vector3.Cross(v0, v1).normalized;
+        if (Vector3.Dot(v2, v2c) < 0f) { v1 = -v1; v2c = Vector3.Cross(v0, v1).normalized; }
+
+        Vector3 ex = v0, ey = v1, ez = v2c;
+
+        // Projeksiyon min/max extents
+        float minX = float.PositiveInfinity, maxX = float.NegativeInfinity;
+        float minY = float.PositiveInfinity, maxY = float.NegativeInfinity;
+        float minZ = float.PositiveInfinity, maxZ = float.NegativeInfinity;
+        for (int i = 0; i < n; i++)
+        {
+            var p = pts[i];
+            float x = Vector3.Dot(p, ex);
+            float y = Vector3.Dot(p, ey);
+            float z = Vector3.Dot(p, ez);
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+        }
+        float hx = Mathf.Max(1e-9f, 0.5f * (maxX - minX));
+        float hy = Mathf.Max(1e-9f, 0.5f * (maxY - minY));
+        float hz = Mathf.Max(1e-9f, 0.5f * (maxZ - minZ));
+
+        // Extents’e göre sırala (büyük→küçük)
+        Vector3[] axes = { ex, ey, ez };
+        float[] h = { hx, hy, hz };
+        for (int a = 0; a < 2; a++)
+        {
+            int maxI = a;
+            for (int b = a + 1; b < 3; b++)
+                if (h[b] > h[maxI]) maxI = b;
+            if (maxI != a)
+            {
+                (h[a], h[maxI]) = (h[maxI], h[a]);
+                (axes[a], axes[maxI]) = (axes[maxI], axes[a]);
+            }
+        }
+        ex = axes[0]; ey = axes[1]; ez = axes[2];
+
+        // Sağ-elli garanti
+        Vector3 ezC2 = Vector3.Cross(ex, ey).normalized;
+        if (Vector3.Dot(ezC2, ez) < 0f) ez = -ez;
+
+        // Dejenerasyon tespiti (eksen oranları)
+        const float EXT_EQ_EPS = 1e-3f; // boyutların yakınlığını oranla kıyasla
+        float r01 = (h[1] <= 1e-6f) ? 1f : Mathf.Abs(h[0] - h[1]) / Mathf.Max(h[0], h[1]);
+        float r12 = (h[2] <= 1e-6f) ? 1f : Mathf.Abs(h[1] - h[2]) / Mathf.Max(h[1], h[2]);
+        degen.axis01Close = r01 < 0.02f + EXT_EQ_EPS;  // %2 yakınlık: kararsız
+        degen.axis12Close = r12 < 0.02f + EXT_EQ_EPS;
+        degen.allClose = degen.axis01Close && degen.axis12Close;
+
+        return new OBBFrame { ex = ex.normalized, ey = ey.normalized, ez = ez.normalized, halfExtents = new Vector3(h[0], h[1], h[2]) };
+    }
+
+    Matrix3x3 _BestAlignBToA(OBBFrame A, OBBFrame B)
+    {
+        Vector3[] a = { A.ex, A.ey, A.ez };
+        Vector3[] b = { B.ex, B.ey, B.ez };
+        int[][] perms = new int[][]
+        {
+        new[]{0,1,2}, new[]{0,2,1},
+        new[]{1,0,2}, new[]{1,2,0},
+        new[]{2,0,1}, new[]{2,1,0}
+        };
+
+        float bestScore = float.NegativeInfinity;
+        Vector3 best0 = Vector3.zero, best1 = Vector3.zero, best2 = Vector3.zero;
+
+        for (int p = 0; p < perms.Length; p++)
+        {
+            int i0 = perms[p][0], i1 = perms[p][1], i2 = perms[p][2];
+
+            Vector3 t0 = b[i0]; if (Vector3.Dot(t0, a[0]) < 0f) t0 = -t0;
+            Vector3 t1 = b[i1]; if (Vector3.Dot(t1, a[1]) < 0f) t1 = -t1;
+            Vector3 t2 = b[i2]; if (Vector3.Dot(t2, a[2]) < 0f) t2 = -t2;
+
+            // sağ-elli düzelt
+            Vector3 t2c = Vector3.Cross(t0, t1).normalized;
+            if (Vector3.Dot(t2c, t2) < 0f) t2 = -t2;
+
+            float score = Vector3.Dot(a[0], t0) + Vector3.Dot(a[1], t1) + Vector3.Dot(a[2], t2);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best0 = t0; best1 = t1; best2 = t2;
+            }
+        }
+
+        return Matrix3x3.FromColumns(best0, best1, best2);
+    }
+
+    struct _Sym3
+    {
+        public double xx, xy, xz, yy, yz, zz;
+        public _Sym3(double _xx, double _xy, double _xz, double _yy, double _yz, double _zz) { xx = _xx; xy = _xy; xz = _xz; yy = _yy; yz = _yz; zz = _zz; }
+    }
+
+    void _JacobiEigen(_Sym3 A, out Vector3 v0, out Vector3 v1, out Vector3 v2, out double l0, out double l1, out double l2)
+    {
+        double[,] M = new double[3, 3] { { A.xx, A.xy, A.xz }, { A.xy, A.yy, A.yz }, { A.xz, A.yz, A.zz } };
+        double[,] V = new double[3, 3] { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+
+        const int MAX_IT = 32;
+        for (int it = 0; it < MAX_IT; it++)
+        {
+            int p = 0, q = 1;
+            double max = Math.Abs(M[0, 1]);
+            double a02 = Math.Abs(M[0, 2]), a12 = Math.Abs(M[1, 2]);
+            if (a02 > max) { max = a02; p = 0; q = 2; }
+            if (a12 > max) { max = a12; p = 1; q = 2; }
+            if (max < 1e-12) break;
+
+            double app = M[p, p], aqq = M[q, q], apq = M[p, q];
+            double phi = 0.5 * Math.Atan2(2 * apq, (aqq - app));
+            double c = Math.Cos(phi), s = Math.Sin(phi);
+
+            for (int k = 0; k < 3; k++)
+            {
+                double mkp = M[k, p], mkq = M[k, q];
+                M[k, p] = c * mkp - s * mkq;
+                M[k, q] = s * mkp + c * mkq;
+            }
+            for (int k = 0; k < 3; k++)
+            {
+                double mpk = M[p, k], mqk = M[q, k];
+                M[p, k] = c * mpk - s * mqk;
+                M[q, k] = s * mpk + c * mqk;
+            }
+
+            for (int k = 0; k < 3; k++)
+            {
+                double vkp = V[k, p], vkq = V[k, q];
+                V[k, p] = c * vkp - s * vkq;
+                V[k, q] = s * vkp + c * vkq;
+            }
+        }
+
+        l0 = M[0, 0]; l1 = M[1, 1]; l2 = M[2, 2];
+        v0 = new Vector3((float)V[0, 0], (float)V[1, 0], (float)V[2, 0]);
+        v1 = new Vector3((float)V[0, 1], (float)V[1, 1], (float)V[2, 1]);
+        v2 = new Vector3((float)V[0, 2], (float)V[1, 2], (float)V[2, 2]);
+    }
+
+    void _SortEigen(ref Vector3 v0, ref Vector3 v1, ref Vector3 v2, ref double l0, ref double l1, ref double l2)
+    {
+        void Swap<T>(ref T a, ref T b) { T t = a; a = b; b = t; }
+        if (l1 > l0) { Swap(ref l0, ref l1); Swap(ref v0, ref v1); }
+        if (l2 > l0) { Swap(ref l0, ref l2); Swap(ref v0, ref v2); }
+        if (l2 > l1) { Swap(ref l1, ref l2); Swap(ref v1, ref v2); }
+    }
+
+    struct Matrix3x3
+    {
+        public Vector3 c0, c1, c2;
+        public Matrix3x3(Vector3 C0, Vector3 C1, Vector3 C2) { c0 = C0; c1 = C1; c2 = C2; }
+        public static Matrix3x3 FromColumns(Vector3 C0, Vector3 C1, Vector3 C2)
+            => new Matrix3x3(C0.normalized, C1.normalized, C2.normalized);
+
+        public Matrix3x3 Transpose()
+        {
+            return new Matrix3x3(
+                new Vector3(c0.x, c1.x, c2.x),
+                new Vector3(c0.y, c1.y, c2.y),
+                new Vector3(c0.z, c1.z, c2.z)
+            );
+        }
+
+        public static Matrix3x3 operator *(Matrix3x3 A, Matrix3x3 B)
+        {
+            Vector3 r0 = new Vector3(A.c0.x, A.c1.x, A.c2.x);
+            Vector3 r1 = new Vector3(A.c0.y, A.c1.y, A.c2.y);
+            Vector3 r2 = new Vector3(A.c0.z, A.c1.z, A.c2.z);
+
+            Vector3 C0 = new Vector3(Vector3.Dot(r0, B.c0), Vector3.Dot(r1, B.c0), Vector3.Dot(r2, B.c0));
+            Vector3 C1 = new Vector3(Vector3.Dot(r0, B.c1), Vector3.Dot(r1, B.c1), Vector3.Dot(r2, B.c1));
+            Vector3 C2 = new Vector3(Vector3.Dot(r0, B.c2), Vector3.Dot(r1, B.c2), Vector3.Dot(r2, B.c2));
+            return new Matrix3x3(C0, C1, C2);
+        }
+
+        public float Trace() => c0.x + c1.y + c2.z;
+    }
+
+    float _RotationAngleDegFromMatrix(Matrix3x3 R)
+    {
+        float t = Mathf.Clamp((R.Trace() - 1f) * 0.5f, -1f, 1f);
+        return Mathf.Acos(t) * Mathf.Rad2Deg;
+    }
+
 
 
     // -------- Gizmos --------

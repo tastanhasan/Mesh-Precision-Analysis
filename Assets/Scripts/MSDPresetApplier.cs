@@ -19,10 +19,10 @@ public class MSDPresetApplier : MonoBehaviour
     [Tooltip("Hedef MeshSimilarityDebugger. Boşsa sahnede otomatik aranır.")]
     public MeshSimilarityDebugger msd;
 
-    public enum Preset { None, Hole2D, Global3D, RotationOnly }   // <— None eklendi
+    public enum Preset { None, Task3, Task1, Task2 }   // <— None eklendi
 
     [Header("Preset")]
-    public Preset presetToApply = Preset.Hole2D;
+    public Preset presetToApply = Preset.Task2;
 
     [Header("Auto Apply (Play)")]
     [Tooltip("Play moduna girerken preset uygula (sahne yeniden yüklense bile).")]
@@ -125,13 +125,13 @@ public class MSDPresetApplier : MonoBehaviour
 
         switch (presetToApply)
         {
-            case Preset.Hole2D:
+            case Preset.Task3:
                 Apply2D_Hole(msd);
                 break;
-            case Preset.Global3D:
+            case Preset.Task1:
                 Apply3D_Global(msd);
                 break;
-            case Preset.RotationOnly:
+            case Preset.Task2:
                 ApplyRotationOnly(msd);
                 break;
         }
@@ -156,59 +156,30 @@ public class MSDPresetApplier : MonoBehaviour
     // -------- Presetler --------
     public static void ApplyRotationOnly(MeshSimilarityDebugger msd)
     {
-        // --- Mod ---
-        msd.perChildMode = true;
-        msd.childCenterAlignByBounds = false; // pozisyon farkı dahil
-        msd.poseInvariant = false;
-        msd.samplesPerMesh = 1000;
-        msd.randomSeed = 12345;
 
-        // --- Rotasyon penalty ---
-        msd.useNormalPenalty = false;
-        msd.useRotationPenalty = true;
-        msd.rotationReference = MeshSimilarityDebugger.RotationReference.World;
-        msd.rotMode = MeshSimilarityDebugger.RotationPenaltyMode.LinearBlend;
+        // Önce Global3D tabanını uygula:
+        Apply3D_Global(msd);
+   
+        // rotationReferenceGlobal artık önemli değil; mesh-tabanlı ölçüm kullanılıyor.
+        // Global3D + rotasyon füzyonu:
+        msd.addChildRotationPenaltyToGlobal = true;                 // <<< YENİ: füzyonu aç
+        msd.useRotationPenalty = true;                              // rotSim hesapla
+        msd.rotationReferenceGlobal = MeshSimilarityDebugger.RotationReference.RootRelative;
 
-        msd.rotWeight = 0.7f;   // rotasyon etkisini orta seviyede tut
-        msd.rotCapDeg = 35f;    // tolerans
-        msd.rotGamma = 1.8f;   // eğri dikliği
-        msd.rotEmphasis = 1.5f;   // etki şiddeti
+        // Rotasyon benzerliği eğrisi (RotationSimilarityFromTheta parametreleri)
+        msd.rotCapDeg = 20f;       // açı tavanı (daha yumuşak kıvrım için 15-30)
+        msd.rotGamma = 2.2f;       // düşüş eğrisi (1.5-3 arası deneyin)
+        msd.rotEmphasis = 2.0f;    // keskinlik (1.2-3 arası)
 
-        // --- Pozisyon penalty ---
-        msd.usePositionPenalty = true;
-        msd.positionReference = MeshSimilarityDebugger.PositionReference.World;
-        msd.posCap = 0.10f; // sahne ölçeğine göre ~10 cm
-        msd.posGamma = 1.4f;
-        msd.posEmphasis = 1.2f;
+        // Global ceza katkısı (mesafeye eklenen pay): lambda * penalty01 * diag
+        msd.rotPenaltyGlobalLambda = 1f; // 0.3-1.0 bandı pratikte mantıklı
+        msd.rotPenaltyChildMultiplier = 10f;
+   
+        // Per-child pozisyon vs. kapalı; istenirse ayrı bir presetle açılabilir.
+        msd.usePositionPenalty = false;
 
-        // Rot+Poz birleşimi
-        msd.poseCombine = MeshSimilarityDebugger.PoseCombine.LinearBlend;
-        msd.poseBlendWeight = 0.3f; // pozisyon %30 etkili
-
-        // --- Toplama / keskinlik ---
-        msd.childAggregation = MeshSimilarityDebugger.ChildAgg.Mean;
-        msd.globalAggregation = MeshSimilarityDebugger.GlobalAgg.Mean;
-        msd.simSharpnessPow = 1.5f; // orta keskinlik
-
-        // --- Şekil etkisi minimum ---
-        msd.metric = SimilarityMetric.TrimmedHausdorff;
-        msd.hausdorffPercentile = 0.999f;
-        msd.useTrimmed = false;
-        msd.useCapped = false;
-        msd.matchDeltaFrac = 0.005f;
-        msd.distanceExponent = 1.5f;
-
-        // Diğerlerini kapalı tut
-        msd.emphasizeEdges = false;
-        msd.holeAwareMatching = false;
-        msd.hausdorffBoundaryOnly = false;
-        msd.centerAlignByBounds = true;
-        msd.projectPlanar = false;
-        msd.forcePlanarFor2D = false;
-        msd.useScalePenalty = false;
-
-        msd.hausdorffAggregation = MeshSimilarityDebugger.HausdorffAgg.MaxOfDirs;
-        msd.diagonalNorm = MeshSimilarityDebugger.DiagNorm.Min;
+        // Not: perChildMode GLOBAL kalacak (false). Eşleştirme, ComputeChildRotationPenaltyAvg01 içinde
+        // index-sırası ile yapılır; mevcut mantık birebir korunur.
     }
 
 
@@ -246,8 +217,7 @@ public class MSDPresetApplier : MonoBehaviour
         msd.useScalePenalty = false;
 
         msd.hausdorffAggregation = MeshSimilarityDebugger.HausdorffAgg.MaxOfDirs;
-        msd.diagonalNorm = MeshSimilarityDebugger.DiagNorm.Min;
-        msd.globalAggregation = MeshSimilarityDebugger.GlobalAgg.Mean;
+      
         msd.childAggregation = MeshSimilarityDebugger.ChildAgg.Mean;
         msd.simSharpnessPow = 2.2f;
 
@@ -263,63 +233,56 @@ public class MSDPresetApplier : MonoBehaviour
     }
 
 
-
-
-
-
-
-
     public static void Apply3D_Global(MeshSimilarityDebugger msd)
     {
-        // Mod
+        // --- Mod / Örnekleme ---
         msd.perChildMode = false;
-
-        // Örnekleme
-        msd.samplesPerMesh = 5000;
+        msd.samplesPerMesh = 7000;          // 5000 → 7000: istikrar için hafif artış
         msd.poseInvariant = true;
         msd.randomSeed = 12345;
 
-        // Kenar vurgusu
+        // Yüzey + hacim
         msd.emphasizeEdges = false;
         msd.edgePortion = 0.35f;
 
-        // Delik duyarlılığı kapalı (3B)
+        // 3B
         msd.holeAwareMatching = false;
         msd.hausdorffBoundaryOnly = false;
 
-        // Hizalama / 3B
+        // Hizalama
         msd.centerAlignByBounds = true;
         msd.projectPlanar = false;
         msd.forcePlanarFor2D = false;
 
-        // Metrik
-        msd.metric = SimilarityMetric.TrimmedHausdorff; // global enum
-        msd.hausdorffPercentile = 0.999f;
+        // --- Metrik: biçim odaklı Chamfer ---
+        msd.metric = SimilarityMetric.ChamferMean;
+        msd.useTrimmed = false;     // küçük outlier budaması
+        msd.trimTopPercent = 0.015f;   // %1.5
+        msd.hausdorffAggregation = MeshSimilarityDebugger.HausdorffAgg.MeanOfDirs;
+        msd.distanceExponent = 1.20f;    // 1.3 → 1.2
 
-        // Dayanıklılık
-        msd.useTrimmed = false;
-        msd.trimTopPercent = 0.05f;
-        msd.useCapped = false;
-        msd.capAtDiagFrac = 0.10f;
-        msd.matchDeltaFrac = 0.005f;
-        msd.distanceExponent = 4f;
+        // Cap: tekil uzun farkları sınırlı tut
+        msd.useCapped = false;            // kapalıydı → aç
+        msd.capAtDiagFrac = 0.12f;           // 0.08 → 0.12
 
-        // Ölçek cezası
+        // Eşleşme toleransı (istatistik)
+        msd.matchDeltaFrac = 0.012f;
+
+        // Ölçek cezası: biçime öncelik
         msd.useScalePenalty = true;
-        msd.scalePenaltyLambda = 2f;
+        msd.scalePenaltyLambda = 1f;      // 1.0 → 0.6
         msd.axisPenaltyWeights = new Vector3(1f, 1f, 1f);
 
-        // Hausdorff yön ve diag norm
-        msd.hausdorffAggregation = MeshSimilarityDebugger.HausdorffAgg.MaxOfDirs;
-        msd.diagonalNorm = MeshSimilarityDebugger.DiagNorm.Min;
+    
 
-        // (Per-Child ayarları burada etkisiz; tutarlı dursun)
-        msd.useNormalPenalty = true;
-        msd.normalPenaltyLambda = 2f;
+        // Diğer cezalar kapalı
+        msd.useNormalPenalty = false;
         msd.useRotationPenalty = false;
 
-        msd.childAggregation = MeshSimilarityDebugger.ChildAgg.Min;
-        msd.globalAggregation = MeshSimilarityDebugger.GlobalAgg.Mean;
+        // Toplama & keskinlik
+        msd.childAggregation = MeshSimilarityDebugger.ChildAgg.Mean;
+   
+        msd.simSharpnessPow = 1.50f;       // 1.25 → 1.15 (yüksek benzerlikleri sıkıştırma)
     }
 
     // Runtime: sahne yüklendikten hemen sonra uygula (domain/scene reload olsa da)
